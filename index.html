@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cambiador de voz</title>
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--text:#1d1d1f;--muted:#6b6b72;--accent:#6c4cf1;--accent-t:#fff;--line:#dedbd3;--ok:#1a9d5c;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121214;--card:#1c1c20;--text:#f0f0f2;--muted:#9a9aa3;--accent:#9b85ff;--accent-t:#121214;--line:#2e2e35;--ok:#4ad08b;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#121214;--card:#1c1c20;--text:#f0f0f2;--muted:#9a9aa3;--accent:#9b85ff;--accent-t:#121214;--line:#2e2e35;--ok:#4ad08b;color-scheme:dark}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.4}
+main{max-width:520px;margin:0 auto;padding:18px 16px 32px}
+h1{font-size:22px;margin:0 0 4px}
+p.sub{margin:0 0 16px;color:var(--muted);font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:14px}
+button{font:inherit;cursor:pointer}
+#go{width:100%;padding:16px;border-radius:14px;border:0;background:var(--accent);color:var(--accent-t);font-weight:700;font-size:17px}
+#go.on{background:#d9354a;color:#fff}
+#status{margin:10px 0 0;font-size:13px;color:var(--muted);min-height:18px}
+.meter{height:8px;background:var(--line);border-radius:6px;overflow:hidden;margin-top:10px}
+#bar{height:100%;width:0;background:var(--ok);transition:width .06s}
+.presets{display:flex;flex-wrap:wrap;gap:8px}
+.presets button{padding:9px 13px;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:14px}
+.presets button.sel{border-color:var(--accent);background:var(--accent);color:var(--accent-t)}
+.row{margin:12px 0 0}
+.row label{display:flex;justify-content:space-between;font-size:14px;margin-bottom:4px}
+.row output{color:var(--muted);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.tip{font-size:13px;color:var(--muted)}
+h2{font-size:15px;margin:0 0 8px}
+</style>
+</head>
+<body>
+<main>
+<h1>🎭 Cambiador de voz</h1>
+<p class="sub">Prototipo en tiempo real con Web Audio API. Todo se procesa en tu dispositivo.</p>
+
+<div class="card">
+<button id="go">Activar micrófono</button>
+<div class="meter"><div id="bar"></div></div>
+<p id="status"></p>
+<p class="tip">⚠️ Usa auriculares para probar: si el altavoz suena cerca del micrófono se produce un pitido (acoplamiento).</p>
+</div>
+
+<div class="card">
+<h2>Personajes</h2>
+<div class="presets" id="presets"></div>
+</div>
+
+<div class="card">
+<h2>Ajustes</h2>
+<div class="row"><label for="st">Tono <output id="o_st"></output></label><input type="range" id="st" min="-12" max="12" step="1" value="0"></div>
+<div class="row"><label for="robot">Robot <output id="o_robot"></output></label><input type="range" id="robot" min="0" max="100" value="0"></div>
+<div class="row"><label for="rf">Frecuencia robot <output id="o_rf"></output></label><input type="range" id="rf" min="20" max="200" value="60"></div>
+<div class="row"><label for="dist">Distorsión <output id="o_dist"></output></label><input type="range" id="dist" min="0" max="100" value="0"></div>
+<div class="row"><label for="echo">Eco <output id="o_echo"></output></label><input type="range" id="echo" min="0" max="100" value="0"></div>
+<div class="row"><label for="vol">Volumen <output id="o_vol"></output></label><input type="range" id="vol" min="0" max="150" value="100"></div>
+</div>
+</main>
+
+<script>
+(function(){
+var $=function(id){return document.getElementById(id)};
+var P=0.12;
+var ctx=null, stream=null, N={}, running=false, raf=0;
+
+var PRESETS={
+ "Normal":{st:0,robot:0,rf:60,dist:0,echo:0},
+ "Demonio":{st:-7,robot:0,rf:60,dist:45,echo:35},
+ "Gigante":{st:-10,robot:0,rf:60,dist:20,echo:20},
+ "Ardilla":{st:8,robot:0,rf:60,dist:0,echo:0},
+ "Robot":{st:0,robot:85,rf:50,dist:15,echo:0},
+ "Alien":{st:4,robot:70,rf:30,dist:0,echo:30}
+};
+var UNITS={st:function(v){return (v>0?"+":"")+v+" semitonos"},robot:function(v){return v+" %"},rf:function(v){return v+" Hz"},dist:function(v){return v+" %"},echo:function(v){return v+" %"},vol:function(v){return v+" %"}};
+var KEYS=["st","robot","rf","dist","echo","vol"];
+
+function curve(a){var n=1024,c=new Float32Array(n),k=a*80;
+ for(var i=0;i<n;i++){var x=i*2/n-1;c[i]=k===0?x:((1+k)*x)/(1+k*Math.abs(x));}
+ return c;}
+
+function apply(){
+ KEYS.forEach(function(k){$("o_"+k).textContent=UNITS[k](+$(k).value);});
+ if(!running)return;
+ var t=ctx.currentTime, v=function(k){return +$(k).value};
+ var ratio=Math.pow(2,v("st")/12), g=Math.abs(ratio-1)*P, down=ratio<1;
+ N.taps.forEach(function(x){
+  x.d.delayTime.setTargetAtTime(down?g:0,t,0.03);
+  x.mg.gain.setTargetAtTime(down?-g:g,t,0.03);
+ });
+ var r=v("robot")/100;
+ N.dry.gain.setTargetAtTime(1-r,t,0.03);
+ N.wet.gain.setTargetAtTime(r*1.6,t,0.03);
+ N.osc.frequency.setTargetAtTime(v("rf"),t,0.03);
+ var d=v("dist")/100;
+ N.pre.gain.setTargetAtTime(1+d*4,t,0.03);
+ N.shaper.curve=curve(d);
+ N.post.gain.setTargetAtTime(1/(1+d*1.5),t,0.03);
+ var e=v("echo")/100;
+ N.eWet.gain.setTargetAtTime(e*0.8,t,0.03);
+ N.fb.gain.setTargetAtTime(0.2+e*0.35,t,0.03);
+ N.master.gain.setTargetAtTime(v("vol")/100,t,0.03);
+}
+
+function build(){
+ var AC=window.AudioContext||window.webkitAudioContext;
+ ctx=new AC({latencyHint:"interactive"});
+ var src=ctx.createMediaStreamSource(stream), sr=ctx.sampleRate, len=Math.round(P*sr);
+ var ramp=ctx.createBuffer(1,len,sr), win=ctx.createBuffer(1,len,sr);
+ var r=ramp.getChannelData(0), w=win.getChannelData(0);
+ for(var i=0;i<len;i++){var ph=i/len;r[i]=1-ph;var s=Math.sin(Math.PI*ph);w[i]=s*s;}
+ N.pitchOut=ctx.createGain(); N.taps=[];
+ var t0=ctx.currentTime+0.05;
+ [0,1].forEach(function(k){
+  var d=ctx.createDelay(1),wg=ctx.createGain(),mg=ctx.createGain();
+  wg.gain.value=0; d.delayTime.value=0; mg.gain.value=0;
+  var rs=ctx.createBufferSource(),ws=ctx.createBufferSource();
+  rs.buffer=ramp;rs.loop=true;ws.buffer=win;ws.loop=true;
+  rs.connect(mg);mg.connect(d.delayTime);ws.connect(wg.gain);
+  src.connect(d);d.connect(wg);wg.connect(N.pitchOut);
+  rs.start(t0+k*P/2);ws.start(t0+k*P/2);
+  N.taps.push({d:d,mg:mg});
+ });
+ N.dry=ctx.createGain();N.wet=ctx.createGain();N.ring=ctx.createGain();N.ring.gain.value=0;
+ N.osc=ctx.createOscillator();N.osc.type="sine";N.osc.connect(N.ring.gain);N.osc.start();
+ N.mix=ctx.createGain();
+ N.pitchOut.connect(N.dry);N.dry.connect(N.mix);
+ N.pitchOut.connect(N.ring);N.ring.connect(N.wet);N.wet.connect(N.mix);
+ N.pre=ctx.createGain();N.shaper=ctx.createWaveShaper();N.shaper.oversample="2x";N.post=ctx.createGain();
+ N.mix.connect(N.pre);N.pre.connect(N.shaper);N.shaper.connect(N.post);
+ N.eDelay=ctx.createDelay(1);N.eDelay.delayTime.value=0.26;N.fb=ctx.createGain();N.eWet=ctx.createGain();
+ N.master=ctx.createGain();
+ N.post.connect(N.master);
+ N.post.connect(N.eDelay);N.eDelay.connect(N.fb);N.fb.connect(N.eDelay);N.eDelay.connect(N.eWet);N.eWet.connect(N.master);
+ N.an=ctx.createAnalyser();N.an.fftSize=512;
+ N.master.connect(N.an);N.master.connect(ctx.destination);
+ running=true;apply();
+ var buf=new Uint8Array(N.an.fftSize);
+ (function loop(){
+  N.an.getByteTimeDomainData(buf);var m=0;
+  for(var i=0;i<buf.length;i++){var x=(buf[i]-128)/128;m+=x*x;}
+  $("bar").style.width=Math.min(100,Math.sqrt(m/buf.length)*320)+"%";
+  raf=requestAnimationFrame(loop);
+ })();
+}
+
+async function start(){
+ var st=$("status");
+ if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){st.textContent="Este navegador no permite acceder al micrófono.";return;}
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:false}});
+ }catch(e){
+  st.textContent="No se pudo acceder al micrófono. Revisa los permisos del navegador.";return;
+ }
+ try{
+  build();
+  if(ctx.state==="suspended")await ctx.resume();
+  var lat=Math.round(((ctx.baseLatency||0)+(ctx.outputLatency||0))*1000);
+  $("go").textContent="Detener";$("go").className="on";
+  st.textContent="En directo · latencia del sistema ≈ "+(lat||"?")+" ms (el cambio de tono añade algunos ms más)";
+ }catch(e){
+  st.textContent="Error al iniciar el audio.";stop();
+ }
+}
+function stop(){
+ running=false;cancelAnimationFrame(raf);
+ try{if(stream)stream.getTracks().forEach(function(t){t.stop()});}catch(e){}
+ try{if(ctx)ctx.close();}catch(e){}
+ ctx=null;stream=null;N={};
+ $("go").textContent="Activar micrófono";$("go").className="";
+ $("bar").style.width="0";$("status").textContent="";
+}
+$("go").addEventListener("click",function(){running?stop():start();});
+
+KEYS.forEach(function(k){$(k).addEventListener("input",function(){
+ Array.prototype.forEach.call(document.querySelectorAll("#presets button"),function(b){b.classList.remove("sel")});
+ apply();
+});});
+
+var box=$("presets");
+Object.keys(PRESETS).forEach(function(name){
+ var b=document.createElement("button");b.textContent=name;
+ b.addEventListener("click",function(){
+  var p=PRESETS[name];
+  Object.keys(p).forEach(function(k){$(k).value=p[k]});
+  Array.prototype.forEach.call(box.children,function(c){c.classList.remove("sel")});
+  b.classList.add("sel");apply();
+ });
+ box.appendChild(b);
+});
+box.children[0].classList.add("sel");
+apply();
+})();
+</script>
+</body>
+</html>
